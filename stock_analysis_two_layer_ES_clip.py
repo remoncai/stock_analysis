@@ -5,8 +5,10 @@ from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import tensorflow as tf
+from tensorflow import clip_by_value
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
 import warnings
@@ -97,14 +99,15 @@ def prepare_sequences(data, seq_length):
 def create_lstm_model(seq_length, n_features):
     """创建LSTM模型"""
     model = Sequential([
-        LSTM(128, return_sequences=True, input_shape=(seq_length, n_features)),  # 增加神经元数量
-        Dropout(0.3),  # 增加dropout比例
-        LSTM(64, return_sequences=False),  # 增加神经元数量
-        Dropout(0.3),
-        Dense(32),  # 增加神经元数量
+        LSTM(64, return_sequences=True, input_shape=(seq_length, n_features), kernel_regularizer=l2(0.01)),
+        Dropout(0.5),
+        LSTM(32, return_sequences=False, kernel_regularizer=l2(0.01)),
+        Dropout(0.5),
+        Dense(16),
         Dense(1)
     ])
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    optimizer = Adam(learning_rate=0.001, clipvalue=1.0)  # 使用梯度裁剪
+    model.compile(optimizer=optimizer, loss='mse')
     return model
 
 def prepare_data_for_training(df, seq_length=60):
@@ -316,25 +319,20 @@ def analyze_stock(stock_code):
     # 创建和训练模型
     model = create_lstm_model(seq_length, len(feature_columns))
     print("\n开始训练模型...")
-    print("每个epoch代表一轮完整的训练，共50轮：")
+    print("每个epoch代表一轮完整的训练，共100轮：")
     # 定义早停法和学习率调度器
     early_stopping = EarlyStopping(
         monitor='val_loss',  # 监控验证损失
         patience=10,  # 等待10轮后停止训练
         restore_best_weights=True  # 恢复最佳权重
     )
-    reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss',  # 监控验证损失
-        factor=0.1,  # 学习率降低因子
-        patience=5,  # 等待5轮后降低学习率
-        min_lr=1e-6  # 最小学习率
-    )
+
     history = model.fit(
         X_train, y_train,
-        epochs=50,
-        batch_size=128,  # 增加批次大小以加快训练
+        epochs=100,
+        batch_size=64,  # 增加批次大小以加快训练
         validation_data=(X_val, y_val),
-        callbacks=[reduce_lr],  # 添加学习率调度器
+        callbacks=[early_stopping],  # 使用早停法
         verbose=1,
         shuffle=True
     )
@@ -450,31 +448,29 @@ def analyze_stock(stock_code):
     txt_path = f'results/{stock_code}.txt'
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"股票代码: {stock_code}\n")
-        f.write(f"股票名称: {stock_name}\n\n")
-        f.write("分析结果：\n")
-        f.write(f"最新收盘价: {df['收盘'].iloc[-1]:.2f} 元\n\n")
-        f.write("预测准确度：\n")
+        f.write(f"股票名称: {stock_name}\n")
         f.write(f"均方根误差(RMSE): {rmse:.2f} 元\n")
-        f.write(f"平均百分比误差(MAPE): {mape:.2f}%\n\n")
-        f.write("未来5个工作日预测价格：\n")
-        for date, price in zip(future_dates, future_pred):
-            f.write(f"{date.strftime('%Y-%m-%d')}: {price:.2f} 元\n")
-        f.write("\n趋势分析：\n")
-        f.write(f"预测5日涨跌幅：{pred_trend:.2f}%\n")
+        f.write(f"平均百分比误差(MAPE): {mape:.2f}%\n")
+        f.write(f"2025-03-25: {future_pred[0]:.2f} 元\n")
+        f.write(f"2025-03-26: {future_pred[1]:.2f} 元\n")
+        f.write(f"2025-03-27: {future_pred[2]:.2f} 元\n")
+        f.write(f"2025-03-28: {future_pred[3]:.2f} 元\n")
+        f.write(f"2025-03-31: {future_pred[4]:.2f} 元\n")
+        f.write(f"预测5日涨跌幅: {pred_trend:.2f}%\n")
         if latest_price > latest_ma5 > latest_ma20:
-            f.write("当前趋势：短期和中期趋势向上\n")
+            f.write("当前趋势: 短期和中期趋势向上\n")
         elif latest_price < latest_ma5 < latest_ma20:
-            f.write("当前趋势：短期和中期趋势向下\n")
+            f.write("当前趋势: 短期和中期趋势向下\n")
         elif latest_price > latest_ma5 and latest_ma5 < latest_ma20:
-            f.write("当前趋势：短期趋势转折，需要观察\n")
+            f.write("当前趋势: 短期趋势转折，需要观察\n")
         else:
-            f.write("当前趋势：趋势不明确，建议观望\n")
+            f.write("当前趋势: 趋势不明确，建议观望\n")
         if pred_trend > 3:
-            f.write("预测趋势：未来5日可能上涨\n")
+            f.write("预测趋势: 未来5日可能上涨\n")
         elif pred_trend < -3:
-            f.write("预测趋势：未来5日可能下跌\n")
+            f.write("预测趋势: 未来5日可能下跌\n")
         else:
-            f.write("预测趋势：未来5日可能震荡\n")
+            f.write("预测趋势: 未来5日可能震荡\n")
 
     print(f"\n分析结果已保存至: {txt_path}")
 

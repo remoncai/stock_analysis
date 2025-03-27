@@ -1,3 +1,5 @@
+#本程序既可以分析A股又可以分析港股。
+
 import akshare as ak
 import pandas as pd
 import numpy as np
@@ -11,6 +13,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
 import warnings
 import os
+import re
 warnings.filterwarnings('ignore')
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
 plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
@@ -28,80 +31,159 @@ model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=
 # 创建保存结果的目录
 os.makedirs('results', exist_ok=True)
 
+def is_hk_stock(stock_code):
+    """判断是否为港股代码"""
+    # 港股代码通常是5位数字，以0开头
+    return bool(re.match(r'^0\d{4}$', str(stock_code)))
+
 def get_stock_data(stock_code):
     """获取股票历史数据"""
     try:
-        # 获取股票日K线数据
-        df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date="20200101", adjust="qfq")  # 扩大历史数据范围
-        if df is None or df.empty:
-            print("错误：未能获取到股票数据")
-            return None
-            
-        # 转换日期格式并设置为索引
-        df['日期'] = pd.to_datetime(df['日期'])
-        df.set_index('日期', inplace=True)
+        if is_hk_stock(stock_code):
+            # 获取港股日K线数据
+            df = ak.stock_hk_hist(symbol=stock_code, period="daily", start_date="20200101", adjust="")
+            print(df.info()) #测试用，release要删掉
+            print(df.describe()) #测试用，release要删掉
+            if df is None or df.empty:
+                print("错误：未能获取到港股数据")
+                return None
+
+            print("港股数据列名:", df.columns.tolist())
+
+            # 港股数据列名已经包含'日期'，直接使用
+            if '日期' not in df.columns:
+                print("错误：港股数据中未找到'日期'列")
+                return None
+
+            # 转换日期格式并设置为索引
+            df['日期'] = pd.to_datetime(df['日期'])
+            df.set_index('日期', inplace=True)
+
+            # 统一列名（港股数据列名已正确，无需重命名）
+            # 只需确保有我们需要的列
+            required_columns = ['开盘', '收盘', '最高', '最低', '成交量']
+            for col in required_columns:
+                if col not in df.columns:
+                    print(f"错误：缺少必要列 {col}")
+                    return None
+
+        else:
+            # 获取A股日K线数据
+            df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date="20200101", adjust="qfq")
+            if df is None or df.empty:
+                print("错误：未能获取到A股数据")
+                return None
+
+            # 转换日期格式并设置为索引
+            df['日期'] = pd.to_datetime(df['日期'])
+            df.set_index('日期', inplace=True)
+
         return df
             
     except Exception as e:
         print(f"获取数据时出错: {str(e)}")
         return None
 
+def get_stock_name(stock_code):
+    """获取股票名称"""
+    try:
+        if is_hk_stock(stock_code):
+            # 获取港股名称
+            hk_stock_list = ak.stock_hk_spot()
+            # 确保代码列是字符串类型，并保持完整的5位代码
+            hk_stock_list['代码'] = hk_stock_list['代码'].astype(str).str.zfill(5)
+            stock_name = hk_stock_list[hk_stock_list['代码'] == str(stock_code).zfill(5)]['名称'].values[0]
+        else:
+            # 获取A股名称
+            stock_info = ak.stock_info_a_code_name()
+            stock_name = stock_info[stock_info['code'] == stock_code]['name'].values[0]
+        return stock_name
+    except Exception as e:
+        print(f"获取股票名称时出错: {str(e)}")
+        return ""
+    except IndexError:
+        print(f"无法找到股票代码: {stock_code}")
+        return ""
+
 def calculate_technical_indicators(df):
     """计算技术指标"""
-    df = df.copy()
-    
-    # 移动平均线
-    for window in [5, 10, 20, 30, 60]:
-        df[f'MA{window}'] = df['收盘'].rolling(window=window).mean()
-        df[f'成交量MA{window}'] = df['成交量'].rolling(window=window).mean()
-    
-    # RSI
-    delta = df['收盘'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # MACD
-    exp1 = df['收盘'].ewm(span=12, adjust=False).mean()
-    exp2 = df['收盘'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
-    
-    # 布林带
-    df['BB_middle'] = df['收盘'].rolling(window=20).mean()
-    df['BB_upper'] = df['BB_middle'] + 2 * df['收盘'].rolling(window=20).std()
-    df['BB_lower'] = df['BB_middle'] - 2 * df['收盘'].rolling(window=20).std()
-    
-    # 价格动量
-    df['动量'] = df['收盘'].pct_change()
-    df['收盘_涨跌幅'] = df['收盘'].pct_change()
-    df['成交量_变化率'] = df['成交量'].pct_change()
-    
-    return df.fillna(method='bfill')
+
+    try:
+        df = df.copy()
+
+        # 移动平均线
+        for window in [5, 10, 20, 30, 60]:
+            df[f'MA{window}'] = df['收盘'].rolling(window=window).mean()
+            df[f'成交量MA{window}'] = df['成交量'].rolling(window=window).mean()
+
+        # RSI
+        delta = df['收盘'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # MACD
+        exp1 = df['收盘'].ewm(span=12, adjust=False).mean()
+        exp2 = df['收盘'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
+
+        # 布林带
+        df['BB_middle'] = df['收盘'].rolling(window=20).mean()
+        df['BB_upper'] = df['BB_middle'] + 2 * df['收盘'].rolling(window=20).std()
+        df['BB_lower'] = df['BB_middle'] - 2 * df['收盘'].rolling(window=20).std()
+
+        # 价格动量
+        df['动量'] = df['收盘'].pct_change()
+        df['收盘_涨跌幅'] = df['收盘'].pct_change()
+        df['成交量_变化率'] = df['成交量'].pct_change()
+
+        # 填充NaN值
+        df = df.fillna(method='bfill').fillna(method='ffill')
+
+        # 确保所有必要特征都存在
+        required_features = ['MA5', 'MA20', 'MA60', 'RSI', 'MACD',
+                             'BB_middle', 'BB_upper', 'BB_lower', '动量',
+                             '收盘_涨跌幅', '成交量_变化率']
+
+        for feature in required_features:
+            if feature not in df.columns:
+                print(f"警告：未能计算出特征 {feature}，使用0填充")
+                df[feature] = 0
+
+        return df
+
+    except Exception as e:
+        print(f"计算技术指标时出错: {str(e)}")
+        return None
 
 def prepare_sequences(data, seq_length):
     """准备LSTM序列数据"""
     sequences = []
     targets = []
+
+    print(f"准备序列，数据形状: {data.shape}, 序列长度: {seq_length}")  #添加调试信息
     
     for i in range(len(data) - seq_length):
         seq = data[i:(i + seq_length)]
-        target = data[i + seq_length]
+        target = data[i + seq_length,0]   # 只取收盘价作为目标
         sequences.append(seq)
         targets.append(target)
-    
+
+    print(f"生成{len(sequences)}个序列")  #添加调试信息
     return np.array(sequences), np.array(targets)
 
 def create_lstm_model(seq_length, n_features):
     """创建LSTM模型"""
+    print(f"创建模型，输入形状: ({seq_length}, {n_features})")
     model = Sequential([
-        LSTM(128, return_sequences=True, input_shape=(seq_length, n_features)),  # 增加神经元数量
-        Dropout(0.3),  # 增加dropout比例
-        LSTM(64, return_sequences=False),  # 增加神经元数量
-        Dropout(0.3),
-        Dense(32),  # 增加神经元数量
+        LSTM(64, return_sequences=True, input_shape=(seq_length, n_features)),  # 减少神经元数量
+        Dropout(0.2),  # 增加dropout比例
+        LSTM(32, return_sequences=False),  # 减少神经元数量
+        Dropout(0.2),
+        Dense(16,activation='relu'),  # 减少神经元数量
         Dense(1)
     ])
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
@@ -113,6 +195,14 @@ def prepare_data_for_training(df, seq_length=60):
     feature_columns = ['收盘', 'MA5', 'MA20', 'MA60', 'RSI', 'MACD', 
                       'BB_middle', 'BB_upper', 'BB_lower', '动量', 
                       '成交量_变化率', '收盘_涨跌幅']
+
+    print(f"使用的特征列: {feature_columns}")
+
+    # 检查特征列是否存在
+    missing_cols = [col for col in feature_columns if col not in df.columns]
+    if missing_cols:
+        print(f"错误：缺失必要列 {missing_cols}")
+        return None, None, None, None, None, None, None
     
     # 准备用于缩放的数据
     price_scaler = MinMaxScaler()
@@ -129,6 +219,12 @@ def prepare_data_for_training(df, seq_length=60):
     # 准备序列数据
     X, y = prepare_sequences(scaled_features, seq_length)
     y = scaled_prices[seq_length:]
+
+    print(f"生成的序列形状: X{X.shape}, y{y.shape}")
+
+    if len(X) == 0:
+        print("错误：生成的序列数量为0")
+        return None, None, None, None, None, None, None
     
     # 划分训练集和验证集
     train_size = int(len(X) * 0.8)
@@ -291,28 +387,62 @@ def plot_results(df, history_pred, future_pred, stock_code, stock_name):
     
     return future_dates
 
-def analyze_stock(stock_code):
-    """主分析函数"""    
-    # 获取股票名称
-    try:
-        stock_info = ak.stock_info_a_code_name()
-        stock_name = stock_info[stock_info['code'] == stock_code]['name'].values[0]
-    except:
-        stock_name = ""
 
-    print(f"\n开始分析股票 {stock_name}({stock_code}) 的价格趋势...")    
-    # 获取数据
-    df = get_stock_data(stock_code)
-    if df is None:
-        return
-    
-    # 计算技术指标
-    df = calculate_technical_indicators(df)
-    
-    # 准备训练数据
-    seq_length = 365  # 使用365天的数据来预测
-    X_train, X_val, y_train, y_val, price_scaler, feature_scaler, feature_columns = prepare_data_for_training(df, seq_length)
-    
+def analyze_stock(stock_code):
+    """主分析函数"""
+    try:
+        # 获取股票名称
+        stock_name = get_stock_name(stock_code)
+        print(f"\n开始分析股票 {stock_name}({stock_code}) 的价格趋势...")
+
+        # 获取数据
+        df = get_stock_data(stock_code)
+        if df is None:
+            return
+
+        # 根据数据长度动态调整序列长度
+        seq_length = min(60, len(df) // 4)  # 使用60或数据长度的1/4，取较小值
+        if seq_length < 30:  # 最小序列长度
+            print(f"错误：数据长度不足({len(df)})，无法进行分析")
+            return
+
+        print(f"使用序列长度: {seq_length}")
+
+        # 计算技术指标
+        df = calculate_technical_indicators(df)
+        if df is None:
+            print("错误：无法计算技术指标")
+            return
+
+        # 检查必要特征
+        required_features = ['收盘', 'MA5', 'MA20', 'MA60', 'RSI', 'MACD',
+                             'BB_middle', 'BB_upper', 'BB_lower', '动量',
+                             '收盘_涨跌幅', '成交量_变化率']
+
+        missing_features = [f for f in required_features if f not in df.columns]
+        if missing_features:
+            print(f"错误：缺少必要特征 {missing_features}")
+            return
+
+        # 准备训练数据
+        result = prepare_data_for_training(df, seq_length)
+        if result is None:
+            print("错误：无法准备训练数据")
+            return
+
+        X_train, X_val, y_train, y_val, price_scaler, feature_scaler, feature_columns = result
+
+        # 创建和训练模型
+        model = create_lstm_model(seq_length, len(feature_columns))
+        print("\n开始训练模型...")
+        print("每个epoch代表一轮完整的训练，共50轮：")
+
+        # [其余模型训练和预测代码...]
+
+    except Exception as e:
+        print(f"分析股票时出错: {str(e)}")
+
+
     # 创建和训练模型
     model = create_lstm_model(seq_length, len(feature_columns))
     print("\n开始训练模型...")
@@ -323,6 +453,7 @@ def analyze_stock(stock_code):
         patience=10,  # 等待10轮后停止训练
         restore_best_weights=True  # 恢复最佳权重
     )
+
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',  # 监控验证损失
         factor=0.1,  # 学习率降低因子
@@ -450,37 +581,35 @@ def analyze_stock(stock_code):
     txt_path = f'results/{stock_code}.txt'
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"股票代码: {stock_code}\n")
-        f.write(f"股票名称: {stock_name}\n\n")
-        f.write("分析结果：\n")
-        f.write(f"最新收盘价: {df['收盘'].iloc[-1]:.2f} 元\n\n")
-        f.write("预测准确度：\n")
+        f.write(f"股票名称: {stock_name}\n")
         f.write(f"均方根误差(RMSE): {rmse:.2f} 元\n")
-        f.write(f"平均百分比误差(MAPE): {mape:.2f}%\n\n")
-        f.write("未来5个工作日预测价格：\n")
-        for date, price in zip(future_dates, future_pred):
-            f.write(f"{date.strftime('%Y-%m-%d')}: {price:.2f} 元\n")
-        f.write("\n趋势分析：\n")
-        f.write(f"预测5日涨跌幅：{pred_trend:.2f}%\n")
+        f.write(f"平均百分比误差(MAPE): {mape:.2f}%\n")
+        f.write(f"2025-03-25: {future_pred[0]:.2f} 元\n")
+        f.write(f"2025-03-26: {future_pred[1]:.2f} 元\n")
+        f.write(f"2025-03-27: {future_pred[2]:.2f} 元\n")
+        f.write(f"2025-03-28: {future_pred[3]:.2f} 元\n")
+        f.write(f"2025-03-31: {future_pred[4]:.2f} 元\n")
+        f.write(f"预测5日涨跌幅: {pred_trend:.2f}%\n")
         if latest_price > latest_ma5 > latest_ma20:
-            f.write("当前趋势：短期和中期趋势向上\n")
+            f.write("当前趋势: 短期和中期趋势向上\n")
         elif latest_price < latest_ma5 < latest_ma20:
-            f.write("当前趋势：短期和中期趋势向下\n")
+            f.write("当前趋势: 短期和中期趋势向下\n")
         elif latest_price > latest_ma5 and latest_ma5 < latest_ma20:
-            f.write("当前趋势：短期趋势转折，需要观察\n")
+            f.write("当前趋势: 短期趋势转折，需要观察\n")
         else:
-            f.write("当前趋势：趋势不明确，建议观望\n")
+            f.write("当前趋势: 趋势不明确，建议观望\n")
         if pred_trend > 3:
-            f.write("预测趋势：未来5日可能上涨\n")
+            f.write("预测趋势: 未来5日可能上涨\n")
         elif pred_trend < -3:
-            f.write("预测趋势：未来5日可能下跌\n")
+            f.write("预测趋势: 未来5日可能下跌\n")
         else:
-            f.write("预测趋势：未来5日可能震荡\n")
+            f.write("预测趋势: 未来5日可能震荡\n")
 
     print(f"\n分析结果已保存至: {txt_path}")
 
 
 if __name__ == "__main__":
-    stock_code = input("Enter stock code:")
+    stock_code = input("Enter stock code  (A股代码如600519，港股代码如02096):")
     # 如果用户没有输入，使用默认值600519（贵州茅台）
     if not stock_code.strip():
         stock_code = "600519"
